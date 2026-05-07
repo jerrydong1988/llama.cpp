@@ -154,25 +154,41 @@ jobs:
           cmake --build build --config ${{ github.event.inputs.build_type || 'Release' }} -j $(nproc)
 
       - name: Package artifacts (zstd)
+        shell: bash
         run: |
+          set -e
           mkdir -p artifacts
-          ARTIFACT="llama-hip-${GPU_TARGETS//,/-}-${{ github.event.inputs.build_type || 'Release' }}-linux-x64"
+          GPU_SAFE="${GPU_TARGETS//,/-}"
+          ARTIFACT="llama-hip-${GPU_SAFE}-${{ github.event.inputs.build_type || 'Release' }}-linux-x64"
+          echo "Packaging into: $ARTIFACT"
           mkdir -p "$ARTIFACT"
+          # Debug: show what was built and where
+          echo "=== build directory structure ==="
+          ls -la build/ 2>/dev/null || true
+          find build -maxdepth 3 -type f -name 'llama-*' 2>/dev/null || true
+          find build -name '*.so' 2>/dev/null || true
+          echo "=== copying binaries ==="
           cp -v build/bin/llama-cli       "$ARTIFACT/" 2>/dev/null || true
           cp -v build/bin/llama-server    "$ARTIFACT/" 2>/dev/null || true
           cp -v build/bin/llama-perplex   "$ARTIFACT/" 2>/dev/null || true
           cp -v build/bin/llama-bench     "$ARTIFACT/" 2>/dev/null || true
           cp -v build/lib/libllama.so     "$ARTIFACT/" 2>/dev/null || true
           cp -v build/lib/libggml*.so     "$ARTIFACT/" 2>/dev/null || true
-          find build -maxdepth 2 -type f -executable -name 'llama-*' -exec cp {} "$ARTIFACT/" \; 2>/dev/null || true
-          find build -maxdepth 2 -name '*.so' -exec cp {} "$ARTIFACT/" \; 2>/dev/null || true
+          # Fallback: find any llama-* executables and .so files
+          find build -maxdepth 2 -type f -executable -name 'llama-*' -exec cp -v {} "$ARTIFACT/" \; 2>/dev/null || true
+          find build -name '*.so' -exec cp -v {} "$ARTIFACT/" \; 2>/dev/null || true
+          # Version info
           echo "Built from: ${{ github.sha }}" > "$ARTIFACT/BUILD_INFO.txt"
           echo "Backend: HIP (AMD)" >> "$ARTIFACT/BUILD_INFO.txt"
           echo "GPU targets: ${GPU_TARGETS}" >> "$ARTIFACT/BUILD_INFO.txt"
           echo "Build type: ${{ github.event.inputs.build_type || 'Release' }}" >> "$ARTIFACT/BUILD_INFO.txt"
-          build/bin/llama-cli --version 2>/dev/null >> "$ARTIFACT/BUILD_INFO.txt" || true
-          tar --zstd -cf "artifacts/llama-hip-${GPU_TARGETS//,/-}.tar.zst" "$ARTIFACT"
-          echo "Artifact size: $(du -sh artifacts/llama-hip-${GPU_TARGETS//,/-}.tar.zst | cut -f1)"
+          if [ -f "$ARTIFACT/llama-cli" ]; then
+            "$ARTIFACT/llama-cli" --version >> "$ARTIFACT/BUILD_INFO.txt" 2>/dev/null || true
+          fi
+          echo "=== contents of $ARTIFACT ==="
+          ls -lh "$ARTIFACT/"
+          tar --zstd -cf "artifacts/llama-hip-${GPU_SAFE}.tar.zst" "$ARTIFACT"
+          echo "Artifact size: $(du -sh artifacts/llama-hip-${GPU_SAFE}.tar.zst | cut -f1)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
