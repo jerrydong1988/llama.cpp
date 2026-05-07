@@ -121,7 +121,6 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rocm/dev-ubuntu-22.04:7.2.1
-      options: --device=/dev/kfd --device=/dev/dri --group-add video
     env:
       GPU_TARGETS: ${{ github.event.inputs.hip_gpu_targets || 'gfx942' }}
     steps:
