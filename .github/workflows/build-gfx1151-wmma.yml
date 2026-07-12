@@ -121,16 +121,26 @@ jobs:
           $bin = Join-Path "${env:BUILD_DIR}" 'bin'
           if (-not (Test-Path -LiteralPath $bin)) { throw "Build bin directory not found: $bin" }
 
-          $runtimeDlls = @('amdhip64_7.dll', 'hipblas.dll', 'hipblaslt.dll', 'rocblas.dll')
-          foreach ($dll in $runtimeDlls) {
-            $src = Join-Path "$hipPath\bin" $dll
-            if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $bin -Force }
+          Get-ChildItem -LiteralPath (Join-Path $hipPath 'bin') -Filter '*.dll' | Copy-Item -Destination $bin -Force
+
+          $rocblasLibrary = Join-Path $hipPath 'bin\rocblas\library'
+          if (Test-Path -LiteralPath $rocblasLibrary) {
+            New-Item -ItemType Directory -Path (Join-Path $bin 'rocblas\library') -Force | Out-Null
+            Copy-Item -LiteralPath "$rocblasLibrary\*" -Destination (Join-Path $bin 'rocblas\library') -Force
+          } else {
+            Write-Warning "rocBLAS kernel directory not found: $rocblasLibrary"
           }
-          New-Item -ItemType Directory -Path (Join-Path $bin 'rocblas\library') -Force | Out-Null
-          New-Item -ItemType Directory -Path (Join-Path $bin 'hipblaslt\library') -Force | Out-Null
-          Copy-Item -LiteralPath "$hipPath\bin\rocblas\library\*" -Destination (Join-Path $bin 'rocblas\library') -Force
-          Copy-Item -LiteralPath "$hipPath\bin\hipblaslt\library\*" -Destination (Join-Path $bin 'hipblaslt\library') -Force
+
+          $hipblasltLibrary = Join-Path $hipPath 'bin\hipblaslt\library'
+          if (Test-Path -LiteralPath $hipblasltLibrary) {
+            New-Item -ItemType Directory -Path (Join-Path $bin 'hipblaslt\library') -Force | Out-Null
+            Copy-Item -LiteralPath "$hipblasltLibrary\*" -Destination (Join-Path $bin 'hipblaslt\library') -Force
+          } else {
+            Write-Warning "hipBLASLt kernel directory not found: $hipblasltLibrary"
+          }
+
           Copy-Item -LiteralPath 'LICENSE' -Destination $bin -Force
+
 
           @"
           source_ref=${{ inputs.source_ref }}
