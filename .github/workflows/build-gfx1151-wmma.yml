@@ -1,0 +1,158 @@
+name: CI (gfx1151 WMMA HIP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch, tag, or commit to build'
+        required: true
+        default: 'rocm-wmma-tune-gfx1151-ci'
+        type: string
+      wmma:
+        description: 'GGML_HIP_ROCWMMA_FATTN value'
+        required: true
+        default: 'on'
+        type: choice
+        options:
+          - on
+          - off
+
+permissions:
+  contents: read
+
+jobs:
+  windows-hip-gfx1151:
+    name: windows-hip-gfx1151-wmma-${{ inputs.wmma }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    env:
+      PYTHON_VERSION: '3.12'
+      ROCM_WHEEL_INDEX: 'https://repo.amd.com/rocm/whl/gfx1151/'
+      ROCM_PACKAGE: 'rocm[libraries,devel]'
+      BUILD_DIR: 'build/hip-gfx1151-wmma-${{ inputs.wmma }}'
+
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ROCm 7.13 gfx1151 wheels and Ninja
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade ninja
+          python -m pip install --upgrade --index-url "${env:ROCM_WHEEL_INDEX}" "${env:ROCM_PACKAGE}"
+          python -m pip list | Select-String -Pattern 'rocm|ninja'
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'Visual Studio Build Tools with x64 C++ tools was not found' }
+          $vcvars = Join-Path $vsPath 'VC/Auxiliary/Build/vcvars64.bat'
+          cmd /c "`"$vcvars`" && set" | ForEach-Object {
+            if ($_ -match '^(.*?)=(.*)$') {
+              Set-Item -Path "Env:$($matches[1])" -Value $matches[2]
+            }
+          }
+
+          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $devel = Join-Path $site '_rocm_sdk_devel'
+          $gfx = Join-Path $site '_rocm_sdk_libraries_gfx1151'
+          $clang = Join-Path $devel 'lib/llvm/bin'
+          $ninja = python -c "import shutil; print(shutil.which('ninja'))"
+
+          foreach ($p in @(
+            (Join-Path $clang 'clang.exe'),
+            (Join-Path $devel 'bin'),
+            (Join-Path $devel 'lib/cmake'),
+            (Join-Path $gfx 'bin/rocblas/library'),
+            (Join-Path $gfx 'bin/hipblaslt/library'),
+            $ninja
+          )) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "Required path not found: $p" }
+          }
+
+          $amdgcnLink = Join-Path $devel 'amdgcn'
+          $amdgcnTarget = Join-Path $devel 'lib/llvm/amdgcn'
+          if ((-not (Test-Path -LiteralPath $amdgcnLink)) -and (Test-Path -LiteralPath $amdgcnTarget)) {
+            New-Item -ItemType Junction -Path $amdgcnLink -Target $amdgcnTarget | Out-Null
+          }
+
+          $wmmaValue = if ('${{ inputs.wmma }}' -eq 'on') { 'ON' } else { 'OFF' }
+          $env:HIP_PLATFORM = 'amd'
+          $env:HIP_PATH = $devel
+          $env:ROCM_PATH = $devel
+          $env:PATH = "$($devel)\bin;$clang;$env:PATH"
+
+          cmake -S . -B "${env:BUILD_DIR}" -G Ninja `
+            -DCMAKE_MAKE_PROGRAM="$ninja" `
+            -DCMAKE_C_COMPILER="$clang\clang.exe" `
+            -DCMAKE_CXX_COMPILER="$clang\clang++.exe" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$devel\lib\cmake" `
+            -DCMAKE_HIP_ARCHITECTURES=gfx1151 `
+            -DGPU_TARGETS=gfx1151 `
+            -DGGML_HIP=ON `
+            -DGGML_HIP_ROCWMMA_FATTN=$wmmaValue `
+            -DGGML_RPC=ON `
+            -DGGML_NATIVE=OFF `
+            -DGGML_OPENMP=ON `
+            -DGGML_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=OFF `
+            -DLLAMA_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_TOOLS=ON `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_CURL=OFF
+
+          cmake --build "${env:BUILD_DIR}" --config Release -j ${env:NUMBER_OF_PROCESSORS}
+
+      - name: Package ROCm runtime and artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $site = python -c "import site; print(site.getsitepackages()[0])"
+          $devel = Join-Path $site '_rocm_sdk_devel'
+          $gfx = Join-Path $site '_rocm_sdk_libraries_gfx1151'
+          $bin = Join-Path "${env:BUILD_DIR}" 'bin'
+          if (-not (Test-Path -LiteralPath $bin)) { throw "Build bin directory not found: $bin" }
+
+          Get-ChildItem -LiteralPath (Join-Path $devel 'bin') -Filter '*.dll' | Copy-Item -Destination $bin -Force
+          Get-ChildItem -LiteralPath (Join-Path $gfx 'bin') -Filter '*.dll' | Copy-Item -Destination $bin -Force
+          Copy-Item -LiteralPath (Join-Path $gfx 'bin/rocblas') -Destination (Join-Path $bin 'rocblas') -Recurse -Force
+          Copy-Item -LiteralPath (Join-Path $gfx 'bin/hipblaslt') -Destination (Join-Path $bin 'hipblaslt') -Recurse -Force
+          Copy-Item -LiteralPath 'LICENSE' -Destination $bin -Force
+
+          @"
+          source_ref=${{ inputs.source_ref }}
+          git_sha=${{ github.sha }}
+          hip_arch=gfx1151
+          rocm_wheel_index=${env:ROCM_WHEEL_INDEX}
+          GGML_HIP_ROCWMMA_FATTN=${{ inputs.wmma }}
+          "@ | Set-Content -LiteralPath (Join-Path $bin 'build-info.txt') -Encoding UTF8
+
+          & (Join-Path $bin 'llama-cli.exe') --version
+
+          $zip = "llama-bin-win-hip-gfx1151-wmma-${{ inputs.wmma }}-${{ github.run_number }}.zip"
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          7z a $zip "$bin\*"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT_ZIP=$zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-bin-win-hip-gfx1151-wmma-${{ inputs.wmma }}
+          path: ${{ env.ARTIFACT_ZIP }}
+          if-no-files-found: error
