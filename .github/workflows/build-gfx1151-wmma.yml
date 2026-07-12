@@ -29,7 +29,7 @@ jobs:
     env:
       PYTHON_VERSION: '3.12'
       ROCM_WHEEL_INDEX: 'https://repo.amd.com/rocm/whl/gfx1151/'
-      ROCM_PACKAGE: 'rocm[libraries,devel]'
+      ROCM_VERSION: '7.13.0'
       BUILD_DIR: 'build/hip-gfx1151-wmma-${{ inputs.wmma }}'
 
     steps:
@@ -50,34 +50,32 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m pip install --upgrade pip
           python -m pip install --upgrade ninja
-          python -m pip install --upgrade --index-url "${env:ROCM_WHEEL_INDEX}" "${env:ROCM_PACKAGE}"
-          python -m pip list | Select-String -Pattern 'rocm|ninja'
 
-          function Find-RocmWheelDir {
-            param(
-              [Parameter(Mandatory = $true)][string] $Package,
-              [Parameter(Mandatory = $true)][string] $DirectoryName
-            )
-            $locationLine = (python -m pip show $Package | Select-String -Pattern '^Location:' | Select-Object -First 1).Line
-            $location = if ($locationLine) { $locationLine -replace '^Location:\s*', '' } else { '' }
-            $pythonRoot = python -c "import sys; print(sys.prefix)"
-            $roots = @($location, (Join-Path $pythonRoot 'Lib\site-packages'), $pythonRoot) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
-            foreach ($root in $roots) {
-              $direct = Join-Path $root $DirectoryName
-              if (Test-Path -LiteralPath $direct) { return $direct }
+          $rocmTarget = Join-Path $env:RUNNER_TEMP 'rocm713'
+          if (Test-Path -LiteralPath $rocmTarget) { Remove-Item -LiteralPath $rocmTarget -Recurse -Force }
+          New-Item -ItemType Directory -Path $rocmTarget | Out-Null
+
+          python -m pip install --upgrade --no-cache-dir --target "$rocmTarget" --index-url "${env:ROCM_WHEEL_INDEX}" `
+            "rocm-sdk-core==${env:ROCM_VERSION}" `
+            "rocm-sdk-devel==${env:ROCM_VERSION}" `
+            "rocm-sdk-libraries-gfx1151==${env:ROCM_VERSION}"
+
+          $devel = Join-Path $rocmTarget '_rocm_sdk_devel'
+          $gfx = Join-Path $rocmTarget '_rocm_sdk_libraries_gfx1151'
+          foreach ($p in @(
+            (Join-Path $devel 'lib/llvm/bin/clang.exe'),
+            (Join-Path $devel 'bin'),
+            (Join-Path $devel 'lib/cmake'),
+            (Join-Path $gfx 'bin/rocblas/library'),
+            (Join-Path $gfx 'bin/hipblaslt/library')
+          )) {
+            if (-not (Test-Path -LiteralPath $p)) {
+              Get-ChildItem -LiteralPath $rocmTarget -Directory | Select-Object Name,FullName | Format-Table -AutoSize
+              throw "Required ROCm wheel path not found: $p"
             }
-            foreach ($root in $roots) {
-              $found = Get-ChildItem -LiteralPath $root -Directory -Recurse -Depth 8 -Filter $DirectoryName -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($found) { return $found.FullName }
-            }
-            Write-Host "Could not find $DirectoryName for $Package. Search roots:"
-            $roots | ForEach-Object { Write-Host "  $_" }
-            python -m pip show $Package
-            throw "Could not locate $DirectoryName"
           }
 
-          $devel = Find-RocmWheelDir -Package 'rocm-sdk-devel' -DirectoryName '_rocm_sdk_devel'
-          $gfx = Find-RocmWheelDir -Package 'rocm-sdk-libraries-gfx1151' -DirectoryName '_rocm_sdk_libraries_gfx1151'
+          Write-Host "ROCm target: $rocmTarget"
           Write-Host "ROCm devel: $devel"
           Write-Host "ROCm gfx1151 libraries: $gfx"
           Add-Content -Path $env:GITHUB_ENV -Value "ROCM_DEVEL=$devel"
