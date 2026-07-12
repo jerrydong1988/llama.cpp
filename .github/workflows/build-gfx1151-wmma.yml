@@ -69,10 +69,10 @@ jobs:
           }
 
           $siteCandidates = @(python -c "import site, sys; paths = site.getsitepackages() + [site.getusersitepackages()] + sys.path; print(''\n''.join(dict.fromkeys([p for p in paths if p])))")
-          $site = $siteCandidates | Where-Object { (Test-Path -LiteralPath (Join-Path $_ ''_rocm_sdk_devel'')) -and (Test-Path -LiteralPath (Join-Path $_ ''_rocm_sdk_libraries_gfx1151'')) } | Select-Object -First 1
+          $site = $siteCandidates | Where-Object { (Test-Path -LiteralPath (Join-Path $_ '_rocm_sdk_devel')) -and (Test-Path -LiteralPath (Join-Path $_ '_rocm_sdk_libraries_gfx1151')) } | Select-Object -First 1
           if (-not $site) {
             $siteCandidates | ForEach-Object { Write-Host "Python path candidate: $_" }
-            throw ''Could not locate ROCm wheel site-packages directory''
+            throw 'Could not locate ROCm wheel site-packages directory'
           }
           $devel = Join-Path $site '_rocm_sdk_devel'
           $gfx = Join-Path $site '_rocm_sdk_libraries_gfx1151'
@@ -129,10 +129,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $siteCandidates = @(python -c "import site, sys; paths = site.getsitepackages() + [site.getusersitepackages()] + sys.path; print(''\n''.join(dict.fromkeys([p for p in paths if p])))")
-          $site = $siteCandidates | Where-Object { (Test-Path -LiteralPath (Join-Path $_ ''_rocm_sdk_devel'')) -and (Test-Path -LiteralPath (Join-Path $_ ''_rocm_sdk_libraries_gfx1151'')) } | Select-Object -First 1
+          $site = $siteCandidates | Where-Object { (Test-Path -LiteralPath (Join-Path $_ '_rocm_sdk_devel')) -and (Test-Path -LiteralPath (Join-Path $_ '_rocm_sdk_libraries_gfx1151')) } | Select-Object -First 1
           if (-not $site) {
             $siteCandidates | ForEach-Object { Write-Host "Python path candidate: $_" }
-            throw ''Could not locate ROCm wheel site-packages directory''
+            throw 'Could not locate ROCm wheel site-packages directory'
           }
           $devel = Join-Path $site '_rocm_sdk_devel'
           $gfx = Join-Path $site '_rocm_sdk_libraries_gfx1151'
