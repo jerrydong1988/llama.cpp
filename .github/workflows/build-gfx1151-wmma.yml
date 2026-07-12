@@ -65,11 +65,22 @@ jobs:
           $core = Join-Path $rocmTarget '_rocm_sdk_core'
           $gfx = Join-Path $rocmTarget '_rocm_sdk_libraries_gfx1151'
           $clang = Join-Path $devel 'lib\llvm\bin'
+          $deviceLibSource = Join-Path $devel 'lib\llvm\amdgcn\bitcode'
+          $deviceLibCompat = Join-Path $devel 'amdgcn\bitcode'
+
+          if (-not (Test-Path -LiteralPath $deviceLibCompat)) {
+            if (-not (Test-Path -LiteralPath $deviceLibSource)) {
+              throw "ROCm device library not found: $deviceLibSource"
+            }
+            New-Item -ItemType Junction `
+              -Path (Join-Path $devel 'amdgcn') `
+              -Target (Join-Path $devel 'lib\llvm\amdgcn') | Out-Null
+          }
 
           $required = @(
             (Join-Path $clang 'clang.exe'),
             (Join-Path $clang 'clang++.exe'),
-            (Join-Path $devel 'amdgcn\bitcode'),
+            $deviceLibCompat,
             (Join-Path $devel 'include\rocwmma\rocwmma.hpp'),
             (Join-Path $gfx 'bin\rocblas\library'),
             (Join-Path $gfx 'bin\hipblaslt\library')
@@ -88,6 +99,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "ROCM_CORE=$core"
           Add-Content -Path $env:GITHUB_ENV -Value "ROCM_GFX=$gfx"
           Add-Content -Path $env:GITHUB_ENV -Value "ROCM_CLANG=$clang"
+          Add-Content -Path $env:GITHUB_ENV -Value "HIP_DEVICE_LIB_PATH=$deviceLibSource"
 
       - name: Configure and build gfx1151
         shell: pwsh
