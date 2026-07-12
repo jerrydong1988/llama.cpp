@@ -11,11 +11,11 @@ on:
       wmma:
         description: 'GGML_HIP_ROCWMMA_FATTN value'
         required: true
-        default: 'on'
+        default: "on"
         type: choice
         options:
-          - on
-          - off
+          - "on"
+          - "off"
 
 permissions:
   contents: read
