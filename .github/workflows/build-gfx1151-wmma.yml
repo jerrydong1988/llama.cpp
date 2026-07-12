@@ -1,4 +1,4 @@
-name: CI (gfx1151 WMMA HIP)
+name: CI (gfx1151 ROCm 7.13 WMMA)
 
 "on":
   workflow_dispatch:
@@ -11,25 +11,24 @@ name: CI (gfx1151 WMMA HIP)
       wmma:
         description: 'GGML_HIP_ROCWMMA_FATTN value'
         required: true
-        default: "on"
+        default: 'on'
         type: choice
         options:
-          - "on"
-          - "off"
+          - 'on'
+          - 'off'
 
 permissions:
   contents: read
 
 jobs:
   windows-hip-gfx1151:
-    name: windows-hip-gfx1151-wmma-${{ inputs.wmma }}
-    runs-on: windows-2022
-    timeout-minutes: 120
+    name: windows-rocm713-gfx1151-wmma-${{ inputs.wmma }}
+    runs-on: windows-2025
+    timeout-minutes: 150
 
     env:
-      HIPSDK_INSTALLER_VERSION: '25.Q3'
-      ROCWMMA_APT_VERSION: '7.0.1'
-      ROCWMMA_DEB: 'rocwmma-dev_2.0.0.70001-42~24.04_amd64.deb'
+      ROCM_VERSION: '7.13.0'
+      ROCM_TARGET_FAMILY: 'gfx1151'
       BUILD_DIR: 'build/hip-gfx1151-wmma-${{ inputs.wmma }}'
 
     steps:
@@ -39,60 +38,85 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
 
-      - name: Grab rocWMMA package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          curl.exe -L -o rocwmma.deb "https://repo.radeon.com/rocm/apt/${env:ROCWMMA_APT_VERSION}/pool/main/r/rocwmma-dev/${env:ROCWMMA_DEB}"
-          7z x rocwmma.deb
-          7z x data.tar
-
-      - name: Cache ROCm installation
-        id: cache-rocm
-        uses: actions/cache@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
-          path: C:\Program Files\AMD\ROCm
-          key: rocm-${{ env.HIPSDK_INSTALLER_VERSION }}-${{ runner.os }}
+          python-version: '3.12'
 
-      - name: Install ROCm HIP SDK
-        if: steps.cache-rocm.outputs.cache-hit != 'true'
+      - name: Install and initialize ROCm 7.13
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host 'Downloading AMD HIP SDK installer'
-          Invoke-WebRequest -Uri "https://download.amd.com/developer/eula/rocm-hub/AMD-Software-PRO-Edition-${env:HIPSDK_INSTALLER_VERSION}-WinSvr2022-For-HIP.exe" -OutFile "${env:RUNNER_TEMP}\rocm-install.exe"
-          Write-Host 'Installing AMD HIP SDK'
-          $proc = Start-Process "${env:RUNNER_TEMP}\rocm-install.exe" -ArgumentList '-install' -NoNewWindow -PassThru
-          $completed = $proc.WaitForExit(600000)
-          if (-not $completed) {
-            $proc.Kill()
-            throw 'ROCm installer timed out after 10 minutes'
-          }
-          if ($proc.ExitCode -ne 0) {
-            throw "ROCm installer failed with exit code $($proc.ExitCode)"
+          $rocmTarget = Join-Path $env:RUNNER_TEMP 'rocm713'
+          New-Item -ItemType Directory -Path $rocmTarget -Force | Out-Null
+
+          Get-PSDrive C | Format-List Name, Used, Free
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir --target $rocmTarget `
+            "rocm[libraries,devel]==${env:ROCM_VERSION}" `
+            --index-url "https://repo.amd.com/rocm/whl/${env:ROCM_TARGET_FAMILY}/"
+
+          $env:PYTHONPATH = $rocmTarget
+          $env:ROCM_SDK_TARGET_FAMILY = $env:ROCM_TARGET_FAMILY
+          python -m rocm_sdk version
+          python -m rocm_sdk init
+
+          $devel = (python -m rocm_sdk path --root).Trim()
+          $core = Join-Path $rocmTarget '_rocm_sdk_core'
+          $gfx = Join-Path $rocmTarget '_rocm_sdk_libraries_gfx1151'
+          $clang = Join-Path $devel 'lib\llvm\bin'
+
+          $required = @(
+            (Join-Path $clang 'clang.exe'),
+            (Join-Path $clang 'clang++.exe'),
+            (Join-Path $devel 'amdgcn\bitcode'),
+            (Join-Path $devel 'include\rocwmma\rocwmma.hpp'),
+            (Join-Path $gfx 'bin\rocblas\library'),
+            (Join-Path $gfx 'bin\hipblaslt\library')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required ROCm 7.13 path not found: $path"
+            }
           }
 
-      - name: Configure and build
+          & (Join-Path $clang 'clang.exe') --version
+          Get-PSDrive C | Format-List Name, Used, Free
+
+          Add-Content -Path $env:GITHUB_ENV -Value "ROCM_PYTHONPATH=$rocmTarget"
+          Add-Content -Path $env:GITHUB_ENV -Value "ROCM_DEVEL=$devel"
+          Add-Content -Path $env:GITHUB_ENV -Value "ROCM_CORE=$core"
+          Add-Content -Path $env:GITHUB_ENV -Value "ROCM_GFX=$gfx"
+          Add-Content -Path $env:GITHUB_ENV -Value "ROCM_CLANG=$clang"
+
+      - name: Configure and build gfx1151
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $clangPath = Get-ChildItem 'C:\Program Files\AMD\ROCm\*\bin\clang.exe' | Select-Object -First 1
-          if (-not $clangPath) { throw 'ROCm clang.exe was not found' }
-          $env:HIP_PATH = Split-Path (Split-Path $clangPath.FullName)
-          $env:ROCM_PATH = $env:HIP_PATH
-          $env:CMAKE_PREFIX_PATH = $env:HIP_PATH
-          $env:PATH = "$($env:HIP_PATH)\bin;$env:PATH"
-          & $clangPath.FullName --version
 
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'Visual Studio C++ build tools were not found' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          cmd.exe /s /c "`"$vcvars`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              [Environment]::SetEnvironmentVariable($matches[1], $matches[2])
+            }
+          }
+
+          $env:PYTHONPATH = $env:ROCM_PYTHONPATH
+          $env:ROCM_SDK_TARGET_FAMILY = $env:ROCM_TARGET_FAMILY
+          $env:HIP_PLATFORM = 'amd'
+          $env:HIP_PATH = $env:ROCM_DEVEL
+          $env:ROCM_PATH = $env:ROCM_DEVEL
+          $env:PATH = "$env:ROCM_DEVEL\bin;$env:ROCM_CLANG;$env:ROCM_CORE\bin;$env:ROCM_GFX\bin;$env:PATH"
           $wmmaValue = if ('${{ inputs.wmma }}' -eq 'on') { 'ON' } else { 'OFF' }
-          $rocwmmaInclude = "$($PWD.Path.Replace('\', '/'))/opt/rocm-${env:ROCWMMA_APT_VERSION}/include/"
 
-          cmake -G "Unix Makefiles" -B "${env:BUILD_DIR}" -S . `
-            -DCMAKE_C_COMPILER="$($env:HIP_PATH)\bin\clang.exe" `
-            -DCMAKE_CXX_COMPILER="$($env:HIP_PATH)\bin\clang++.exe" `
-            -DCMAKE_CXX_FLAGS="-I$rocwmmaInclude -Wno-ignored-attributes -Wno-nested-anon-types" `
+          cmake -S . -B $env:BUILD_DIR -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$($env:HIP_PATH)" `
+            -DCMAKE_C_COMPILER="$env:ROCM_CLANG\clang.exe" `
+            -DCMAKE_CXX_COMPILER="$env:ROCM_CLANG\clang++.exe" `
+            -DCMAKE_PREFIX_PATH="$env:ROCM_DEVEL\lib\cmake" `
             -DCMAKE_HIP_ARCHITECTURES=gfx1151 `
             -DAMDGPU_TARGETS=gfx1151 `
             -DGPU_TARGETS=gfx1151 `
@@ -100,7 +124,6 @@ jobs:
             -DGGML_HIP_ROCWMMA_FATTN=$wmmaValue `
             -DGGML_RPC=ON `
             -DGGML_NATIVE=OFF `
-            -DGGML_CPU=ON `
             -DGGML_OPENMP=ON `
             -DGGML_BUILD_TESTS=OFF `
             -DLLAMA_BUILD_EXAMPLES=OFF `
@@ -109,50 +132,66 @@ jobs:
             -DLLAMA_BUILD_SERVER=ON `
             -DLLAMA_CURL=OFF
 
-          cmake --build "${env:BUILD_DIR}" --config Release -j ${env:NUMBER_OF_PROCESSORS}
+          cmake --build $env:BUILD_DIR --config Release -j $env:NUMBER_OF_PROCESSORS
 
-      - name: Package ROCm runtime and artifact
+      - name: Package ROCm 7.13 runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $clangPath = Get-ChildItem 'C:\Program Files\AMD\ROCm\*\bin\clang.exe' | Select-Object -First 1
-          if (-not $clangPath) { throw 'ROCm clang.exe was not found' }
-          $hipPath = Split-Path (Split-Path $clangPath.FullName)
-          $bin = Join-Path "${env:BUILD_DIR}" 'bin'
+          $bin = Join-Path $env:BUILD_DIR 'bin'
           if (-not (Test-Path -LiteralPath $bin)) { throw "Build bin directory not found: $bin" }
 
-          Get-ChildItem -LiteralPath (Join-Path $hipPath 'bin') -Filter '*.dll' | Copy-Item -Destination $bin -Force
-
-          $rocblasLibrary = Join-Path $hipPath 'bin\rocblas\library'
-          if (Test-Path -LiteralPath $rocblasLibrary) {
-            New-Item -ItemType Directory -Path (Join-Path $bin 'rocblas\library') -Force | Out-Null
-            Copy-Item -LiteralPath "$rocblasLibrary\*" -Destination (Join-Path $bin 'rocblas\library') -Force
-          } else {
-            Write-Warning "rocBLAS kernel directory not found: $rocblasLibrary"
+          function Copy-RequiredFile([string] $source, [string] $destination) {
+            if (-not (Test-Path -LiteralPath $source)) { throw "Required runtime file not found: $source" }
+            Copy-Item -LiteralPath $source -Destination $destination -Force
           }
 
-          $hipblasltLibrary = Join-Path $hipPath 'bin\hipblaslt\library'
-          if (Test-Path -LiteralPath $hipblasltLibrary) {
-            New-Item -ItemType Directory -Path (Join-Path $bin 'hipblaslt\library') -Force | Out-Null
-            Copy-Item -LiteralPath "$hipblasltLibrary\*" -Destination (Join-Path $bin 'hipblaslt\library') -Force
-          } else {
-            Write-Warning "hipBLASLt kernel directory not found: $hipblasltLibrary"
+          $coreDlls = @(
+            'amdhip64_7.dll',
+            'amd_comgr0713.dll',
+            'hiprtc07013.dll',
+            'hiprtc-builtins07013.dll',
+            'rocm_kpack.dll',
+            'rocm-openblas.dll',
+            'rocm-openblas64.dll'
+          )
+          foreach ($dll in $coreDlls) {
+            Copy-RequiredFile (Join-Path $env:ROCM_DEVEL "bin\$dll") $bin
           }
 
+          $gfxDlls = @(
+            'hipblas.dll',
+            'libhipblaslt.dll',
+            'rocblas.dll',
+            'rocsolver.dll',
+            'hipsparse.dll',
+            'hiprand.dll',
+            'rocsparse.dll',
+            'rocrand.dll',
+            'rocfft.dll'
+          )
+          foreach ($dll in $gfxDlls) {
+            Copy-RequiredFile (Join-Path $env:ROCM_GFX "bin\$dll") $bin
+          }
+
+          Copy-RequiredFile 'C:\Windows\System32\libomp140.x86_64.dll' $bin
+          Copy-Item -LiteralPath (Join-Path $env:ROCM_GFX 'bin\rocblas') -Destination (Join-Path $bin 'rocblas') -Recurse -Force
+          Copy-Item -LiteralPath (Join-Path $env:ROCM_GFX 'bin\hipblaslt') -Destination (Join-Path $bin 'hipblaslt') -Recurse -Force
           Copy-Item -LiteralPath 'LICENSE' -Destination $bin -Force
 
-
+          $sourceSha = (git rev-parse HEAD).Trim()
           @"
           source_ref=${{ inputs.source_ref }}
-          git_sha=${{ github.sha }}
+          source_sha=$sourceSha
+          rocm_version=${env:ROCM_VERSION}
           hip_arch=gfx1151
-          hip_sdk_installer=${env:HIPSDK_INSTALLER_VERSION}
           GGML_HIP_ROCWMMA_FATTN=${{ inputs.wmma }}
           "@ | Set-Content -LiteralPath (Join-Path $bin 'build-info.txt') -Encoding UTF8
 
           & (Join-Path $bin 'llama-cli.exe') --version
+          & (Join-Path $bin 'llama-server.exe') --version
 
-          $zip = "llama-bin-win-hip-gfx1151-wmma-${{ inputs.wmma }}-${{ github.run_number }}.zip"
+          $zip = "llama-bin-win-rocm713-gfx1151-wmma-${{ inputs.wmma }}-${{ github.run_number }}.zip"
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
           7z a $zip "$bin\*"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT_ZIP=$zip"
@@ -160,6 +199,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-bin-win-hip-gfx1151-wmma-${{ inputs.wmma }}
+          name: llama-bin-win-rocm713-gfx1151-wmma-${{ inputs.wmma }}
           path: ${{ env.ARTIFACT_ZIP }}
           if-no-files-found: error
